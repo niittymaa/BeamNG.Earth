@@ -44,7 +44,7 @@ RECOMMENDED = ["--deshadow", "full", "--near-visual", "detail", "--airports", "o
                "--buildings", "on"]
 SERVER_PORT = 47613         # earthd's default
 GAME_GONE_S = 30            # no game process this long: the game closed (wait_for_game)
-GAME_START_S = 180          # waiting for the game's process after asking Steam
+GAME_START_S = 25          # waiting for the game's process after asking Steam
 DIRECT_FAIL_S = 20          # a direct start that ends this soon did not work (no Steam client): through Steam
 
 
@@ -443,10 +443,23 @@ def windows_beamng_ini():
     return _ini(os.path.join(base, "BeamNG", "BeamNG.drive.ini"))
 
 
-def windows_game_dir():
+def windows_game_dir(explicit=None):
     """The game's folder on Windows (also inside a Proton prefix), as BeamMP's launcher finds it: installPath in
     %LOCALAPPDATA%\\BeamNG\\BeamNG.drive.ini, else the game's registry key, else Steam's libraries."""
-    ok = lambda d: d and os.path.isfile(os.path.join(d, "BeamNG.drive.exe"))
+    ok = lambda d: bool(d and os.path.isfile(os.path.join(d, "BeamNG.drive.exe")))
+    if ok(explicit):
+        return explicit
+    for env_var in ("BNGE_GAME_DIR", "BEAMNG_DIR", "BEAMNG_PATH"):
+        val = os.environ.get(env_var)
+        if ok(val):
+            return val
+    try:
+        import install
+        cfg_val = install.load_config().get("game_dir")
+        if ok(cfg_val):
+            return cfg_val
+    except Exception:
+        pass
     d = windows_beamng_ini().get("installPath")
     if ok(d):
         return d
@@ -487,29 +500,23 @@ def windows_game_dir():
 GFX_ARG = {"dx11": "dx11", "dx12": "d3d12", "vk": "vk"}
 
 
-def start_game(use_gcpatch, build="native", gfx="", user_dir=None):
+def start_game(use_gcpatch, build="native", gfx="", user_dir=None, game_dir=None):
     """Start the game; returns a Popen when this process started it directly, else None (through Steam)."""
     win_args = ["-gfx", GFX_ARG.get(gfx, gfx)] if gfx else []
     extra = os.environ.get("BNGE_GAME_ARGS", "").split()     # (tests: e.g. "-bngetest car,damage")
     win_args += extra
-    if IS_WIN and not win_args and not under_wine():
-        # through Steam on Windows itself: Steam Input (a Steam Controller), the overlay and Steam's play time reach
-        # only a game Steam started (GitHub #218, 1.6.1 on Windows: "Steam doesn't pass input from the Steam
-        # Controller into the game"). Not with start options (--gfx, tests): Steam asks the player whether to allow
-        # them; not under Wine / Proton, where Steam's links do not reach Steam
-        row("Game", "starting through Steam")
-        os.startfile(f"steam://rungameid/{APP_ID}")
-        return None
     if IS_WIN:
-        # as BeamMP's launcher: the game's own launcher (BeamNG.drive.exe) in its folder, waited on. Works under
-        # Wine / Proton too (the .exe started with protontricks), where Steam's links do not reach Steam
-        d = windows_game_dir()
+        d = windows_game_dir(game_dir)
         if d:
-            row("Game", f"starting ({d})")
+            row("Game", f"starting directly ({d})")
             try:
                 return subprocess.Popen([os.path.join(d, "BeamNG.drive.exe")] + win_args, cwd=d)
             except OSError as e:
-                say(f"could not start it ({e}); asking Steam")
+                say(f"could not start it directly ({e}); asking Steam")
+        if not under_wine():
+            row("Game", "starting through Steam")
+            os.startfile(f"steam://rungameid/{APP_ID}")
+            return None
     elif build == "proton":
         row("Game", "starting through Steam (the Windows build, Proton)")
         steam_launch(win_args)
@@ -613,8 +620,10 @@ def wait_for_game(proc):
     t0, said = time.time(), False
     while not game_pids():
         if not said and time.time() - t0 > GAME_START_S and not game_launcher_running():
-            say("the game has not started yet (no BeamNG.drive process): start it from Steam; the server keeps "
-                "running for it, Ctrl+C stops it")
+            say("the game has not started yet (no BeamNG.drive process).")
+            say("  If Steam failed with 'No license' (AppError_5), ensure you own BeamNG.drive on Steam")
+            say("  or specify the game installation folder with --game-dir or set BNGE_GAME_DIR.")
+            say("  The server keeps running for it; Ctrl+C stops it.")
             said = True
         time.sleep(2)
     gone_since = None
@@ -853,6 +862,7 @@ def main():
     ap.add_argument("--no-beammp", action="store_true",
                     help="do not start BeamMP (multiplayer) with the game (bmplaunch.py)")
     ap.add_argument("--user-dir", help="BeamNG.drive user folder (default: found)")
+    ap.add_argument("--game-dir", help="BeamNG.drive game installation directory (where BeamNG.drive.exe is)")
     ap.add_argument("--proton", dest="build", action="store_const", const="proton",
                     help="Linux: the game is the Windows build under Proton")
     ap.add_argument("--native", dest="build", action="store_const", const="native",
@@ -1045,7 +1055,7 @@ def run(args):
         else:
             if wine:
                 say("(under Wine / Proton: on Linux the AppImage runs the server natively, faster)")
-            proc = start_game(not args.no_gcpatch, build, args.gfx, user_dir)
+            proc = start_game(not args.no_gcpatch, build, args.gfx, user_dir, getattr(args, "game_dir", None))
         say()
         say("In the game: Freeroam > BeamNG.Earth.  Closing the game stops the server.")
         say()
